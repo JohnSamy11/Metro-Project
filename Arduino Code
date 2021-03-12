@@ -1,0 +1,632 @@
+/***********************************************/
+/*           Libraries Includes                */
+/***********************************************/
+#include <Arduino_FreeRTOS.h>
+#include <task.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <SoftwareSerial.h>
+/***********************************************/
+/*                 definitions                 */
+/***********************************************/
+////////////////////RFID pins////////////////////
+#define SS_PIN 53
+#define RST_PIN 5
+/////////////////LCD Connection//////////////////
+#define lcdFirstHeaderBit 0x5A
+#define lcdSecondHeaderBit 0xA5
+#define lcdWriteRegister 0x80
+#define lcdWriteMemory 0x82
+#define lcdPicIDRegister 0x03
+#define lcdJumpCommandLength 0x04
+#define lcdWriteMemory 0x05
+//////////////////pictures id////////////////////
+#define welcome 1
+#define createPin_AR 13
+#define createPin_EN 26
+#define loading_AR 6
+#define loading_EN 19
+#define blocked_AR 7
+#define blocked_EN 20
+#define Home_AR 4
+#define Home_EN 27
+#define wrongPin_AR 11
+#define wrongPin_EN 24
+#define matchError_EN 23
+#define matchError_AR 10
+#define pinCreated_AR 16
+#define pinCreated_EN 30
+#define pinChangde_AR 9
+#define pinChangde_EN 22
+#define error_AR 8
+#define error_EN 21
+#define reserPin_AR 15
+#define reserPin_EN 29
+//orders for connection between Arduino and node///
+#define chkPassword 01
+#define ritPassword 02
+#define rdBalance 03
+#define addBalance 04
+#define blocked 05
+#define newCard 06
+////////Variables addresses at LCD memory//////////
+#define password_EN 01
+#define password_AR 02
+#define recharge 03
+#define newPin 04
+#define confirmPin 05
+#define oldPin 06
+#define balance 07
+///////////////////////others/////////////////////
+#define EN false //English language
+#define AR true  //Arabic language
+#define Rpin 4   //reset pin
+#define zero 0x00
+/***********************************************/
+/*                  Variables                  */
+/***********************************************/
+int S_saver[] = {32, 33, 34, 35, 36};
+int lcdVal, nodeVal;
+int tempVar = 0, tempAdr = 0;
+int tempVar2 = 0, tempAdr2 = 0;
+byte lcdData[15] = {};
+byte nodeData[15] = {};
+byte sendData[15] = {};
+byte count = 0;
+byte lcdAdr, nodeReq;
+byte iloop;
+bool lang = AR;
+String cardID;
+unsigned int wait;
+bool matching = false;
+byte nuidPICC[4];
+/***********************************************/
+/*                     Objects                 */
+/***********************************************/
+SoftwareSerial node(10, 11); // RX, TX
+MFRC522 rfid(SS_PIN, RST_PIN);
+MFRC522::MIFARE_Key key;
+TaskHandle_t sleep_mode;
+TaskHandle_t play;
+TaskHandle_t rfid_read;
+/***********************************************/
+/*                 Setup Function              */
+/***********************************************/
+void setup() {
+  digitalWrite(Rpin, LOW);
+  Serial.begin(9600);
+  Serial3.begin(9600);
+  node.begin(9600);
+  SPI.begin(); // Init SPI bus
+  rfid.PCD_Init(); // Init MFRC522
+  for (byte i = 0; i < 6; i++) {
+    key.keyByte[i] = 0xFF;
+  }
+  xTaskCreate(SLEEP_MODE,
+              "SLEEP_MODE",
+              128,
+              NULL,
+              1,
+              &sleep_mode);
+  xTaskCreate(PLAY,
+              "Start program",
+              128,
+              NULL,
+              1,
+              &play);
+  xTaskCreate(RFID,
+              "Read_RFID",
+              128,
+              NULL,
+              1,
+              &rfid_read);
+  vTaskSuspend( play );
+}
+/***********************************************/
+/*                 loop Function               */
+/***********************************************/
+void loop() {}
+void SLEEP_MODE(void *pvParameters) {
+  (void) pvParameters;
+  for (;;)
+  {
+    for (byte i = 0 ; i <= 4; i++) {
+      vTaskSuspend( play );
+      vTaskSuspend( rfid_read );
+      jumpToImg(i, 1);
+      vTaskResume( rfid_read );
+      delay(3000);
+    }
+  }
+}
+void PLAY(void *pvParameters) {
+  (void) pvParameters;
+  for (;;) {
+    readLCD();
+    lcdAdr = lcdDataAnalysis();
+    if (lcdAdr == password_EN || lcdAdr == password_AR) {
+      if (lcdAdr == password_EN) {
+        lang = EN;
+        jumpToImg(loading_EN, 0);
+      }
+      else if (lcdAdr == password_AR) {
+        lang = AR;
+        jumpToImg(loading_AR, 0);
+      }
+      askNode(chkPassword, lcdVal, 7);
+      delay(1000);
+    }
+    else if (lcdAdr == recharge) {
+      if (lcdVal <= 99) {
+        askNode(addBalance, lcdVal, 6);
+      }
+      else if ( balance > 100) {
+        askNode(addBalance, lcdVal, 7);
+      }
+      if (lang == AR) {
+        jumpToImg(loading_AR, 0);
+      }
+      else if (lang == EN) {
+        jumpToImg(loading_EN, 0);
+      }
+      askNode(rdBalance, 0, 5);
+      delay(2000);
+    }
+    else if (lcdAdr == newPin || lcdAdr == confirmPin || lcdAdr == oldPin) {
+      tempVar = lcdVal;
+      tempAdr = lcdAdr;
+secInput:
+      readLCD();
+      lcdAdr = lcdDataAnalysis();
+      if (lcdAdr == newPin || lcdAdr == confirmPin || lcdAdr == oldPin ) {
+        if (lcdAdr != tempAdr) {
+          tempVar2 = lcdVal;
+          tempAdr2 = lcdAdr;
+finalInput:
+          readLCD();
+          lcdAdr = lcdDataAnalysis();
+          if (lcdAdr == newPin || lcdAdr == confirmPin || lcdAdr == oldPin ) {
+            if (lcdAdr != tempAdr && lcdAdr != tempAdr2) {
+              if (lang == AR) {
+                jumpToImg(loading_AR, 0);
+              }
+              else if (lang == EN) {
+                jumpToImg(loading_EN, 0);
+              }
+              if (tempAdr == oldPin) {
+                askNode(chkPassword, tempVar, 7);
+                delay(100);
+                matching = checkMatching(tempVar2, lcdVal);
+                tempVar = lcdVal;
+              }
+              else if (tempAdr2 == oldPin) {
+                askNode(chkPassword, tempVar2, 7);
+                delay(100);
+                matching = checkMatching(tempVar, lcdVal);
+              }
+              else if (lcdAdr == oldPin) {
+                askNode(chkPassword, lcdVal, 7);
+                delay(100);
+                matching = checkMatching(tempVar2, tempVar);
+              }
+              readNode();
+              nodeReq = nodeDataAnalysis();
+              if (nodeReq == chkPassword) {
+                if (nodeVal == true) {
+                  count = 0;
+                  if (matching) {
+                    askNode(ritPassword, lcdVal, 7);
+                    if (lang == AR) {
+                      jumpToImg(pinChangde_AR, 0);
+                    }
+                    else if (lang == EN) {
+                      jumpToImg(pinChangde_EN, 0);
+                    }
+                    delay(5000);
+                    digitalWrite(Rpin, HIGH);
+                    delay(500);
+                  }
+                  else {
+                    if (lang == AR) {
+                      jumpToImg(matchError_AR, 0);
+                      delay(2000);
+                      jumpToImg(Home_EN, 0);
+                    }
+                    else if (lang == EN) {
+                      jumpToImg(matchError_EN, 0);
+                      delay(2000);
+                      jumpToImg(Home_EN, 0);
+                    }
+                  }
+                }
+                else if (nodeVal == false) {
+                  if (lang == AR) {
+                    jumpToImg(wrongPin_AR, 0);
+                    delay(3000);
+                    jumpToImg(reserPin_AR, 0);
+                  }
+                  else if (lang == EN) {
+                    jumpToImg(wrongPin_EN, 0);
+                    delay(3000);
+                    jumpToImg(Rpin, 0);
+                  }
+                  count++;
+                  if (count > 2) {
+                    sendData[7] = blocked;
+                    sdData(sendData, 5);
+                    if (lang == AR) {
+                      jumpToImg(blocked_AR, 0);
+                    }
+                    else if (lang == EN) {
+                      jumpToImg(blocked_EN, 0);
+                    }
+                    delay(2000);
+                    digitalWrite(Rpin, HIGH);
+                    delay(500);
+                  }
+                }
+              }
+            }
+            else {
+              goto finalInput;
+            }
+          }
+        }
+        else {
+          goto secInput;
+        }
+      }
+    }
+    readNode();
+    nodeReq = nodeDataAnalysis();
+    if (nodeReq == blocked) {
+      if (lang == AR) {
+        jumpToImg(blocked_AR, 0);
+      }
+      else if (lang == EN) {
+        jumpToImg(blocked_EN, 0);
+      }
+      delay(5000);
+      digitalWrite(Rpin, HIGH);
+      delay(500);
+    }
+    else if (nodeReq == chkPassword) {
+      if (nodeVal == true) {
+        count = 0;
+        showBalance();
+        if (lang == AR) {
+          jumpToImg(Home_AR, 0);
+        }
+        else if (lang == EN) {
+          jumpToImg(Home_EN, 0);
+        }
+      }
+      else if (nodeVal == false) {
+        if (lang == AR) {
+          jumpToImg(wrongPin_AR, 0);
+        }
+        else if (lang == EN) {
+          jumpToImg(wrongPin_EN, 0);
+        }
+        delay(3000);
+        count++;
+        if (count > 2) {
+          sendData[7] = blocked;
+          sdData(sendData, 5);
+          if (lang == AR) {
+            jumpToImg(blocked_AR, 0);
+          }
+          else if (lang == EN) {
+            jumpToImg(blocked_EN, 0);
+          }
+          delay(2000);
+          digitalWrite(Rpin, HIGH);
+          delay(500);
+        }
+        jumpToImg(welcome, 0);
+      }
+    }
+    if (nodeReq == rdBalance) {
+      lcdSendVal(0x0007, nodeVal);
+      if (lang == AR) {
+        jumpToImg(Home_AR, 0);
+      }
+      else if (lang == EN) {
+        jumpToImg(Home_EN, 0);
+      }
+    }
+    else if (nodeReq == newCard) {
+createpassword:
+      if (lang == AR) {
+        jumpToImg(createPin_AR, 0);
+      }
+      else if (lang == EN) {
+        jumpToImg(createPin_EN, 0);
+      }
+      readLCD();
+      lcdAdr = lcdDataAnalysis();
+      if (lcdAdr == newPin || lcdAdr == confirmPin) {
+        tempVar = lcdVal;
+        tempAdr = lcdAdr;
+nextInput:
+        readLCD();
+        lcdAdr = lcdDataAnalysis();
+        if ((lcdAdr == newPin || lcdAdr == confirmPin) ) {
+          if (lcdAdr != tempAdr) {
+            if (tempVar == lcdVal) {
+              if (lang == AR) {
+                jumpToImg(loading_AR, 0);
+              }
+              else if (lang == EN) {
+                jumpToImg(loading_EN, 0);
+              }
+              askNode(ritPassword, lcdVal, 7);
+              readNode();
+              nodeReq = nodeDataAnalysis();
+              if (nodeReq == ritPassword) {
+                if (nodeVal == 1) {
+                  if (lang == AR) {
+                    jumpToImg(pinCreated_AR, 0);
+                  }
+                  else if (lang == EN) {
+                    jumpToImg(pinCreated_EN, 0);
+                  }
+                }
+                else if (nodeVal == 0 ) {
+                  if (lang == AR) {
+                    jumpToImg(error_AR, 0);
+                  }
+                  else if (lang == EN) {
+                    jumpToImg(error_EN, 0);
+                  }
+                }
+              }
+              delay(3000);
+              digitalWrite(Rpin, HIGH);
+              delay(500);
+            }
+            else {
+              if (lang == AR) {
+                jumpToImg(matchError_AR, 0);
+              }
+              else if (lang == EN) {
+                jumpToImg(matchError_EN, 0);
+              }
+              delay(2000);
+              goto createpassword;
+            }
+          }
+          else {
+            if (lang == AR) {
+              jumpToImg(createPin_AR, 0);
+            }
+            else if (lang == EN) {
+              jumpToImg(createPin_EN, 0);
+            }
+            goto nextInput;
+          }
+        }
+      }
+    }
+  }
+}
+void RFID(void *pvParameters) {
+  (void) pvParameters;
+  for (;;) {
+    if (rfid.PICC_IsNewCardPresent()) {
+      if (  rfid.PICC_ReadCardSerial()) {
+        vTaskSuspend( sleep_mode );
+        MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
+        if (piccType != MFRC522::PICC_TYPE_MIFARE_MINI &&
+            piccType != MFRC522::PICC_TYPE_MIFARE_1K &&
+            piccType != MFRC522::PICC_TYPE_MIFARE_4K) {
+          vTaskResume( sleep_mode );
+          vTaskSuspend( rfid_read );
+        }
+        else {
+          getID(rfid.uid.uidByte, rfid.uid.size);
+          vTaskSuspend( sleep_mode );
+          jumpToImg(welcome, 0);
+          vTaskResume( play );
+          vTaskSuspend( rfid_read );
+        }
+      }
+      else {
+        vTaskResume( sleep_mode );
+      }
+    }
+    else {
+      vTaskResume( sleep_mode );
+    }
+  }
+}
+void readLCD() {
+  lcdData[0] = 0;
+  iloop = 0;
+  lcdVal = 0;
+  lcdAdr = 0;
+  wait = (millis() / 1000) + 30;
+  while (!Serial3.available()) {
+    delay(100);
+    if (wait < (millis() / 1000)) {
+      if (lang == AR) {
+        jumpToImg(error_AR, 0);
+      }
+      else if (lang == EN) {
+        jumpToImg(error_EN, 0);
+      }
+      delay(3000);
+      digitalWrite(Rpin, HIGH);
+      delay(500);
+    }
+  }
+  while (Serial3.available() > 0) {
+    lcdData[iloop] = Serial3.read();
+    iloop++;
+    delay(50);
+  }
+}
+byte lcdDataAnalysis() {
+  if (lcdData[0] == 0x5A) {
+    if (lcdData[1] == 0xA5)
+    {
+      delay(100);
+      lcdVal = (lcdData[7] << 8) + lcdData[8];
+      return lcdData[5];
+    }
+    else {
+      return 0;
+    }
+  }
+  else {
+    return 0;
+  }
+}
+void jumpToImg(byte imgAdd, bool ss) {
+  SoftwareSerial LCD(15, 14);
+  LCD.begin(9600);
+  if (ss) {
+    Serial3.write(lcdFirstHeaderBit);
+    Serial3.write(lcdSecondHeaderBit);
+    Serial3.write(lcdJumpCommandLength);
+    Serial3.write(lcdWriteRegister);
+    Serial3.write(lcdPicIDRegister);
+    Serial3.write(zero);
+    Serial3.write(S_saver[imgAdd]);
+  }
+  else {
+    Serial3.write(lcdFirstHeaderBit);
+    Serial3.write(lcdSecondHeaderBit);
+    Serial3.write(lcdJumpCommandLength);
+    Serial3.write(lcdWriteRegister);
+    Serial3.write(lcdPicIDRegister);
+    Serial3.write(zero);
+    Serial3.write(imgAdd);
+  }
+  delay(500);
+  pinMode(15, INPUT);
+  pinMode(14, OUTPUT);
+  Serial3.begin(9600);
+}
+void readNode() {
+  iloop = 0;
+  wait = (millis() / 1000) + 40;
+  while (node.available() <= 0) {
+    delay(100);
+    if (wait < (millis() / 1000)) {
+      if (lang == AR) {
+        jumpToImg(error_AR, 0);
+      }
+      else if (lang == EN) {
+        jumpToImg(error_EN, 0);
+      }
+      delay(3000);
+      digitalWrite(Rpin, HIGH);
+      delay(500);
+    }
+  }
+  while (node.available() > 0) {
+    nodeData[iloop] = node.read();
+    Serial.println(nodeData[iloop]);
+    delay(50);
+    iloop++;
+  }
+}
+byte nodeDataAnalysis() {
+  if (nodeData[0] == 0xA1 && nodeData[1] == 0xA2) {
+    if (nodeData[3] == rdBalance) {
+      if (nodeData[4] == 1) {
+        if (nodeData[2] == 3) {
+          nodeVal = nodeData[5];
+        }
+        else if (nodeData[2] == 4) {
+          nodeVal = (nodeData[5] * 100) + nodeData[6];
+        }
+      }
+      else if (nodeData[4] == 0) {
+        nodeVal = nodeData[5] * -1;
+      }
+    }
+    else {
+      if (nodeData[2] == 1) {
+        nodeVal = 0;
+      }
+      else if (nodeData[2] == 2) {
+        nodeVal = nodeData[4];
+      }
+      else if (nodeData[2] == 3) {
+        nodeVal = (nodeData[4] * 100) + nodeData[5];
+      }
+    }
+    return nodeData[3];
+  }
+  else {
+    return -1;
+  }
+}
+void sdData (byte x[], byte lenght) {
+  int i = 0;
+  x[0] = (0xA1);
+  x[1] = (0xA2);
+  x[2] = lenght;
+  while (i < lenght + 3) {
+    node.write(x[i]);
+    delay(20);
+    i++;
+  }
+  delay(30);
+}
+void getID(byte * buffer, byte bufferSize) {
+  for (byte i = 0; i < 4; i++) {
+    sendData[i + 3] = buffer[i];
+  }
+}
+void showBalance() {
+  askNode(rdBalance, 0, 5);
+  readNode();
+  nodeReq = nodeDataAnalysis();
+  if (nodeReq == rdBalance) {
+    lcdSendVal(0x0007, nodeVal);
+  }
+}
+void askNode(byte order, int value, byte len) {
+  sendData[7] = order;
+  if (value <= 99) {
+    sendData[8] = value;
+  }
+  else if ( value > 100) {
+    sendData[8] = value / 100;
+    sendData[9] = value % 100;
+  }
+  sdData(sendData, len);
+}
+bool checkMatching(int frs, int sec) {
+  if (frs == sec) {
+    return true;
+  }
+  else {
+    return false;
+  }
+}
+void lcdSendVal(int iAdr, int iVal) {
+  SoftwareSerial LCD(15, 14);
+  LCD.begin(9600);
+  byte bAdrL, bAdrH, bValL, bValH;
+  bAdrL = iAdr & 0xFF;
+  bAdrH = (iAdr >> 8) & 0xFF;
+  bValL = iVal & 0xFF;
+  bValH = (iVal >> 8) & 0xFF;
+  
+  Serial3.write(lcdFirstHeaderBit);
+  Serial3.write(lcdSecondHeaderBit);
+  Serial3.write(lcdWriteMemory);
+  Serial3.write(lcdWriteMemory);
+  Serial3.write(bAdrH);
+  Serial3.write(bAdrL);
+  Serial3.write(bValH);
+  Serial3.write(bValL);
+  delay(500);
+  pinMode(15, INPUT);
+  pinMode(14, OUTPUT);
+  Serial3.begin(9600);
+}
